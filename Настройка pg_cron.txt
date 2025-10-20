@@ -1,0 +1,109 @@
+//Проверяем что расширение установлено
+SHOW shared_preload_libraries;
+
+//Подключаем расширение 
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+//Проверяем что список работ пуст
+
+SELECT * FROM cron.job;
+
+//Создаем тригерную функцию, признаюсь, тема новая, поэтому без ChatGPT не обошлось
+CREATE OR REPLACE FUNCTION log_user_update()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Логируем изменение имени
+    IF NEW.name IS DISTINCT FROM OLD.name THEN
+        INSERT INTO users_audit(user_id, changed_by, field_changed, old_value, new_value)
+        VALUES (OLD.id, current_user, 'name', OLD.name, NEW.name);
+    END IF;
+
+    -- Логируем изменение email
+    IF NEW.email IS DISTINCT FROM OLD.email THEN
+        INSERT INTO users_audit(user_id, changed_by, field_changed, old_value, new_value)
+        VALUES (OLD.id, current_user, 'email', OLD.email, NEW.email);
+    END IF;
+
+    -- Логируем изменение роли
+    IF NEW.role IS DISTINCT FROM OLD.role THEN
+        INSERT INTO users_audit(user_id, changed_by, field_changed, old_value, new_value)
+        VALUES (OLD.id, current_user, 'role', OLD.role, NEW.role);
+    END IF;
+
+    -- Обновляем timestamp
+    NEW.updated_at := CURRENT_TIMESTAMP;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+//Создаем тригер 
+CREATE TRIGGER trg_log_user_update
+BEFORE UPDATE ON users
+FOR EACH ROW
+EXECUTE FUNCTION log_user_update();
+
+//Создаем функцию созранение данных в csv 
+CREATE OR REPLACE FUNCTION export_today_audit_to_csv()
+RETURNS void AS $$
+DECLARE
+    export_path TEXT;
+BEGIN
+    -- формируем путь с сегодняшней датой
+    export_path := '/tmp/users_audit_export_' || to_char(CURRENT_DATE, 'YYYY-MM-DD') || '.csv';
+
+    -- экспортируем свежие данные (за сегодня)
+    EXECUTE format($f$
+        COPY (
+            SELECT *
+            FROM users_audit
+            WHERE DATE(changed_at) = CURRENT_DATE
+        ) TO %L WITH CSV HEADER
+    $f$, export_path);
+
+    RAISE NOTICE 'Exported today''s users_audit to %', export_path;
+END;
+$$ LANGUAGE plpgsql;
+
+
+//В рамках задачи сделаем вызов, что сохранился файл
+SELECT export_today_audit_to_csv();
+
+//Создаем задачу в pg_cron
+SELECT cron.schedule(
+    'export_users_audit_daily',    -- имя задачи
+    '0 3 * * *',                   -- CRON-выражение (ежедневно в 3:00)
+    $$SELECT export_today_audit_to_csv();$$
+);
+
+//Проверяем наличие задачи
+SELECT * FROM cron.job;
+
+
+Информация терминала, что файл создан:
+lrwxrwxrwx   1 root root    7 Aug 24 16:20 bin -> usr/bin
+drwxr-xr-x   2 root root 4096 Aug 24 16:20 boot
+drwxr-xr-x   5 root root  340 Oct 18 15:53 dev
+drwxr-xr-x   2 root root 4096 Sep 30 00:09 docker-entrypoint-initdb.d
+drwxr-xr-x   1 root root 4096 Oct 18 07:03 etc
+drwxr-xr-x   2 root root 4096 Aug 24 16:20 home
+lrwxrwxrwx   1 root root    7 Aug 24 16:20 lib -> usr/lib
+drwxr-xr-x   2 root root 4096 Sep 29 00:00 media
+drwxr-xr-x   2 root root 4096 Sep 29 00:00 mnt
+drwxr-xr-x   2 root root 4096 Sep 29 00:00 opt
+dr-xr-xr-x 260 root root    0 Oct 18 15:53 proc
+drwx------   1 root root 4096 Sep 30 00:09 root
+drwxr-xr-x   1 root root 4096 Sep 30 00:10 run
+lrwxrwxrwx   1 root root    8 Aug 24 16:20 sbin -> usr/sbin
+drwxr-xr-x   2 root root 4096 Sep 29 00:00 srv
+dr-xr-xr-x  11 root root    0 Oct 18 15:53 sys
+drwxrwxrwt   1 root root 4096 Oct 20 12:23 tmp
+drwxr-xr-x   1 root root 4096 Sep 29 00:00 usr
+drwxr-xr-x   1 root root 4096 Sep 29 00:00 var
+root@cc2456c9e258:/# cd temp
+bash: cd: temp: No such file or directory
+root@cc2456c9e258:/# cd tmp
+root@cc2456c9e258:/tmp# ls -l
+total 4
+-rw-r--r-- 1 postgres postgres 67 Oct 20 12:23 users_audit_export_2025-10-20.csv
+root@cc2456c9e258:/tmp# 
