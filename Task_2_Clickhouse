@@ -1,0 +1,109 @@
+-- 1. Основная "сырая" таблица
+CREATE TABLE user_events (
+	user_id UInt32,
+    event_type String,
+    points_spent UInt32,
+    event_time DateTime
+) ENGINE = MergeTree()
+ORDER BY (event_time, user_id)
+TTL toDate(event_time) + INTERVAL 30 DAY;
+
+
+--2. Создаем таблицу для сырых логов, тк нам нужно знать кол-во разные агр типы(сумма, кол-во, уникальные), то используем AMT
+
+CREATE TABLE user_events_agg (
+	event_date Date,
+	event_type String,
+	uniq_users AggregateFunction(uniq, UInt32),
+	total_points AggregateFunction(sum, UInt32),
+	total_actions AggregateFunction(count, UInt32)
+) ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (event_date, event_type)
+TTL event_date + INTERVAL 180 DAY;
+
+--3. Создаем материализованное представление, которое будет срабатывать автоматически и обновлять логи
+
+CREATE MATERIALIZED VIEW user_events_mv
+TO user_events_agg
+AS
+SELECT
+	toDate(event_time) AS event_date,
+	event_type,
+	uniqState(user_id) AS uniq_users,
+	sumState(points_spent) AS total_points,
+	countState() AS total_actions
+FROM user_events
+GROUP BY event_date, event_type;
+
+--Вставляем данные, убрал комменты, с ними не проходило
+
+INSERT INTO user_events VALUES
+
+(1, 'login', 0, subtractDays(now(), 10)),
+(2, 'signup', 0, subtractDays(now(), 10)),
+(3, 'login', 0, subtractDays(now(), 10)),
+
+
+(1, 'login', 0, subtractDays(now(), 7)),
+(2, 'login', 0, subtractDays(now(), 7)),
+(3, 'purchase', 30, subtractDays(now(), 7)),
+
+
+(1, 'purchase', 50, subtractDays(now(), 5)),
+(2, 'logout', 0, subtractDays(now(), 5)),
+(4, 'login', 0, subtractDays(now(), 5)),
+
+
+(1, 'login', 0, subtractDays(now(), 3)),
+(3, 'purchase', 70, subtractDays(now(), 3)),
+(5, 'signup', 0, subtractDays(now(), 3)),
+
+
+(2, 'purchase', 20, subtractDays(now(), 1)),
+(4, 'logout', 0, subtractDays(now(), 1)),
+(5, 'login', 0, subtractDays(now(), 1)),
+
+
+(1, 'purchase', 25, now()),
+(2, 'login', 0, now()),
+(3, 'logout', 0, now()),
+(6, 'signup', 0, now()),
+(6, 'purchase', 100, now());
+
+--Считаем Retention, тут признаюсь, не сам писал. Конструкция WITH пока не понятна
+WITH
+    -- День первого события (нулевой день)
+    (SELECT toDate(min(event_time)) FROM user_events) AS day_0
+
+SELECT
+    countDistinctIf(user_id, toDate(event_time) = day_0) AS total_users_day_0,
+
+    countDistinctIf(
+        user_id,
+        toDate(event_time) BETWEEN day_0 + 7 AND day_0 + 7
+        AND user_id IN (
+            SELECT DISTINCT user_id
+            FROM user_events
+            WHERE toDate(event_time) = day_0
+        )
+    ) AS returned_in_7_days,
+
+    round(
+        (returned_in_7_days / total_users_day_0) * 100,
+        2
+    ) AS retention_7d_percent
+
+FROM user_events;
+
+--Выводим аналитику по дням
+
+SELECT
+    event_date,
+    event_type,
+    uniqMerge(uniq_users) AS unique_users,
+    sumMerge(total_points) AS total_spent,
+    countMerge(total_actions) AS total_actions
+FROM user_events_agg
+GROUP BY event_date, event_type
+ORDER BY event_date ASC;
