@@ -1,0 +1,37 @@
+Решение Задания на миграцию данных, степ - 5.2
+
+Описание задания: Нам нужно избавиться дублирования данных при повторных запусках producer'а.
+
+Решение:
+1. В первую очеред нам нужно добавить поле sent_to_kafka в оригинальную таблицу в Postgres и установить значение False(Данные еще не отправлялись в Kafka)
+
+ALTER TABLE user_logins ADD COLUMN sent_to_kafka BOOLEAN DEFAULT FALSE;
+
+2. Затем открываем нащ скрипт producer и нам нужно отредактировать запрос к выгрузке данных.
+
+cursor.execute("SELECT id, username, event_type, extract(epoch FROM event_time) FROM user_logins WHERE sent_to_kafka = False")
+
+Мы дополнительно выгружаем поле id. По этому полю мы будем менять флаг sent_to_kafka на True после того как данные будут загружены в kafka. Затем мы фильтруем только те поля, где флаг sent_to_kafka равен False
+
+3. Вносим корректировки в цикл обработки каждой строки в выгрузке:
+for row in rows:
+    user_id = row[0]
+    data = {
+        "user": row[1],
+        "event": row[2],
+        "timestamp": float(row[3])  # преобразуем Decimal → float
+    }
+    producer.send("user_events", value=data)
+    print("Sent:", data)
+
+
+    cursor.execute('UPDATE user_logins SET sent_to_kafka = True WHERE id = %s',
+                   (user_id,)
+                   )
+    conn.commit()
+
+    time.sleep(0.5)
+
+Вводим новую переменную user_id, которая будет равно полю id (необязательный шаг, но код становится читабельнее)
+Корректируем значения "user", "event", "timestamp" в словаре data. Тк мы добавили новое поле id, то все значения сместились на + 1
+И делаем update нашей основной таблицы в Postgres, по конкретному id мы меняем флаг sent_to_kafka на True. Таким образом при повторном запуске producer эти данные уже будут отфильтрованы и не попадут в kafka

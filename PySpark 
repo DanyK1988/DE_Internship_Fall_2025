@@ -1,0 +1,85 @@
+//Установка PySpark в Docker (docker-compose)
+..
+
+// У меня возникла прроблема с кодировкой, поэтому пришлось пересоздать файл с правильной кодировкой
+with open("russian_houses.csv", "r", encoding="utf-16") as f_in:
+    text = f_in.read()
+
+with open("russian_houses_utf8.csv", "w", encoding="utf-8") as f_out:
+    f_out.write(text)
+
+//Чтение файла
+df_houses = spark.read.csv('russian_houses_utf8.csv', header=True, inferSchema=True)
+
+//Преобразования текстовые и числовые поля
+df_houses = (
+    df_houses
+    .withColumn("maintenance_year", F.col("maintenance_year").cast("int"))  # из строки в int
+    .withColumn("square", F.regexp_replace("square", " ", "").cast("float"))  # убрать пробелы и перевести в float
+    .withColumn("population", F.col("population").cast("int"))
+    .withColumn("latitude", F.col("latitude").cast("float"))
+    .withColumn("longitude", F.col("longitude").cast("float"))
+    .withColumn("communal_service_id", F.col("communal_service_id").cast("float"))
+)
+
+//Очистка данных, удалеям из базы строки с сроком меньше 1800 и выше 2024
+df_houses = df_houses.filter(
+    (F.col("maintenance_year").between(1800, 2024))
+)
+
+// Находим средние и медианное значение по столбцу maintanance_year
+avg_year = int(df_houses.select(F.avg("maintenance_year")).collect()[0][0]) //1969
+median_year = int(df_houses.select(F.median("maintenance_year")).collect()[0][0]) //1970
+
+//Создаем новые столбцы с этими значениями
+df_houses = df_houses.withColumn("avg_year", F.lit(avg_year))
+df_houses = df_houses.withColumn("median_year", F.lit(median_year))
+
+//Областей и городов с наибольшим количеством построек
+top_regions = (
+    df_houses.groupBy("region")
+    .agg(F.count("*").alias("objects_count"))
+    .orderBy(F.desc("objects_count"))
+    .limit(10)
+)
+
+//Ищем максимальные и минимальные площади по районам 
+size_stats = (
+    df_houses.groupBy("region")
+    .agg(
+        F.max("square").alias("max_square"),
+        F.min("square").alias("min_square")
+    )
+    .orderBy(F.desc("max_square"))
+)
+
+size_stats.show(truncate=False)
+
+//Количество строений по десятилетиям, помню в pandas есть бакеты, тут пришлось искать, но вроде проще делается
+df_by_decade = (
+    df_houses
+    .filter(F.col("maintenance_year").isNotNull())
+    .withColumn("decade", (F.floor(F.col("maintenance_year") / 10) * 10).cast("int"))
+    .groupBy("decade")
+    .agg(F.count("*").alias("buildings_count"))
+    .orderBy("decade")
+)
+
+//Создаем таблицу в Clickhouse с нашей структурой
+CREATE TABLE russian_houses
+(
+    house_id Int32,
+    latitude Float32,
+    longitude Float32,
+    maintenance_year Int32,
+    square Float32,
+    population Int32,
+    region String,
+    locality_name String,
+    address String,
+    full_address String,
+    communal_service_id Float32,
+    description String
+)
+ENGINE = MergeTree()
+ORDER BY house_id;
